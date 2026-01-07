@@ -1,1 +1,9 @@
 #可调参数
+camera:
+  device_id: 0 # 默认摄像头
+  width: 640
+  height: 480
+  fps: 30
+  save_image_path: ./data/images
+  save_video_path: ./data/videos
+  record_video: false # 是否录像
