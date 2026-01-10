@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# ML / CV
+*.pt
+*.pth
+*.onnx
+*.engine
+runs/
+datasets/
+
+# Env
+.env
