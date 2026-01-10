@@ -25,8 +25,11 @@ robot_dog_vision_system.egg-info/top_level.txt
 scripts/__init__.py
 scripts/register_face.py
 scripts/test_camera.py
+scripts/test_gesture.py
+scripts/test_hand_detector.py
 scripts/test_model_speed.py
 scripts/test_yolo.py
+scripts/test_yolo_bbox.py
 utils/__init__.py
 utils/draw.py
 utils/logger.py
