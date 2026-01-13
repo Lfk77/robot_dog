@@ -9,6 +9,7 @@ __pycache__/
 *.engine
 runs/
 datasets/
+data/
 
 # Env
 .env

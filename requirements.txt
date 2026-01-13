@@ -15,7 +15,7 @@ opencv-python>=4.8.1      # OpenCV，摄像头 + 图像处理
 numpy>=1.24.0             # 数值计算
 
 # === 手势识别 ===
-mediapipe         # 手部关键点检测
+mediapipe ==0.10.9        # 手部关键点检测
 
 # === 可视化 & 数据分析 ===
 matplotlib>=3.7.1         # 可视化
