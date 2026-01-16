@@ -1,43 +1,29 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
-摄像头实时手势识别
-- 使用 MediaPipe 检测手部关键点
+摄像头实时手部检测（MediaPipe）
 - 根据关键点生成 bbox
-- 对 bbox 进行 YOLOv8 分类模型推理
-- 在手部绘制框和类别置信度
+- bbox 按比例放大
 """
 
 import cv2
 import time
 import numpy as np
 import mediapipe as mp
-from ultralytics import YOLO
 
 
-class GestureRecognizer:
+class HandDetector:
     def __init__(
         self,
-        cls_model_path="runs/classify/train3/weights/best.pt",
         camera_id=0,
         width=1280,
         height=720,
-        pad_ratio=0.3,
-        max_hands=1,
-        imgsz=224,
-        device="cuda"
+        pad_ratio=0.3,   # ⭐ bbox 扩张比例（0.2~0.4 推荐）
+        max_hands=1
     ):
         self.camera_id = camera_id
         self.width = width
         self.height = height
         self.pad_ratio = pad_ratio
-        self.max_hands = max_hands
-        self.imgsz = imgsz
-
-        print(f"[INFO] 加载手势分类模型: {cls_model_path}")
-        self.model = YOLO(cls_model_path)
-        self.device = device
 
         # MediaPipe 初始化
         self.mp_hands = mp.solutions.hands
@@ -60,7 +46,9 @@ class GestureRecognizer:
         return self.fps
 
     def get_hand_bbox(self, landmarks, w, h):
-        """根据 21 个关键点计算 bbox 并放大"""
+        """
+        根据 21 个关键点计算并放大 bbox
+        """
         xs = [lm.x for lm in landmarks.landmark]
         ys = [lm.y for lm in landmarks.landmark]
 
@@ -82,36 +70,6 @@ class GestureRecognizer:
 
         return x1, y1, x2, y2
 
-    def classify_hand(self, hand_img):
-        """YOLOv8 分类模型预测手势"""
-        try:
-            if hand_img is None or hand_img.size == 0:
-                return "unknown", 0.0
-
-            # BGR -> RGB
-            hand_img = cv2.cvtColor(hand_img, cv2.COLOR_BGR2RGB)
-            # resize
-            hand_img = cv2.resize(hand_img, (self.imgsz, self.imgsz))
-            # 确保 np.ndarray 且 dtype uint8
-            hand_img = np.array(hand_img, dtype=np.uint8)
-
-            # 推理
-            results = self.model(hand_img, device=self.device, verbose=False)[0]
-
-            if hasattr(results, "probs") and results.probs is not None:
-                # 获取概率数据 - 注意：results.probs是一个Probs对象，需要访问.data属性
-                probs = results.probs.data.cpu().numpy()
-                class_id = int(np.argmax(probs))
-                conf = float(probs[class_id])
-                class_name = results.names[class_id]
-                return class_name, conf
-            else:
-                return "unknown", 0.0
-
-        except Exception as e:
-            print(f"[ERROR] 分类模型预测异常: {e}")
-            return "error", 0.0
-
     def run(self):
         cap = cv2.VideoCapture(self.camera_id)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
@@ -132,23 +90,28 @@ class GestureRecognizer:
 
             if result.multi_hand_landmarks:
                 for hand_landmarks in result.multi_hand_landmarks:
-                    # 绘制关键点
-                    self.mp_draw.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+                    # 画关键点
+                    self.mp_draw.draw_landmarks(
+                        frame,
+                        hand_landmarks,
+                        self.mp_hands.HAND_CONNECTIONS
+                    )
 
-                    # 获取 bbox
+                    # 计算并放大 bbox
                     x1, y1, x2, y2 = self.get_hand_bbox(hand_landmarks, w, h)
 
-                    # 裁剪手部
-                    hand_img = frame[y1:y2, x1:x2]
+                    # 画 bbox
+                    cv2.rectangle(
+                        frame,
+                        (x1, y1),
+                        (x2, y2),
+                        (0, 255, 0),
+                        2
+                    )
 
-                    # 分类
-                    class_name, conf = self.classify_hand(hand_img)
-
-                    # 绘制 bbox + 类别
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(
                         frame,
-                        f"{class_name}: {conf:.2f}",
+                        "Hand",
                         (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
@@ -157,9 +120,17 @@ class GestureRecognizer:
                     )
 
             fps = self.calculate_fps()
-            cv2.putText(frame, f"FPS: {int(fps)}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+            cv2.putText(
+                frame,
+                f"FPS: {int(fps)}",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (255, 0, 0),
+                2
+            )
 
-            cv2.imshow("Hand Gesture Recognition", frame)
+            cv2.imshow("Hand Detection (Big BBox)", frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:  # ESC
@@ -171,11 +142,8 @@ class GestureRecognizer:
 
 
 if __name__ == "__main__":
-    recognizer = GestureRecognizer(
-        cls_model_path="runs/classify/train3/weights/best.pt",
-        pad_ratio=0.3,
-        max_hands=1,
-        imgsz=224,
-        device="cuda"  # 有 GPU 用 "cuda"
+    detector = HandDetector(
+        camera_id=0,
+        pad_ratio=0.3  # ⭐ 调这里让框更大/更小
     )
-    recognizer.run()
+    detector.run()
