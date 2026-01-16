@@ -11,15 +11,15 @@ YOLO_DIR = "gesture_dataset"            # 输出 YOLO 数据集目录
 # 类别映射（顺序固定）
 classes = [
     "hello",
-    "hand up",
+    "handup",
     "vectory",
-    "i love you",
-    "yes",
+    "iloveyou",
+    "fist",
     "no",
     "ok",
     "okay",
-    "call me",
-    "thaks"
+    "callme",
+    "thanks"
 ]
 
 # -----------------------------
@@ -67,9 +67,9 @@ def process_split(split):
     """
     split = "train" 或 "test"
     """
-    img_in_dir = os.path.join("/home/lfk/robot_dog/data/multi-hand-gesture-dataset-main", split)
-    img_out_dir = os.path.join("/home/lfk/robot_dog/data/dataset1", "images", "train" if split=="train" else "val")
-    label_out_dir = os.path.join("/home/lfk/robot_dog/data/dataset1", "labels", "train" if split=="train" else "val")
+    img_in_dir = os.path.join("data/multi-hand-gesture-dataset-main", split)
+    img_out_dir = os.path.join("data/dataset1", "images", "train" if split=="train" else "val")
+    label_out_dir = os.path.join("data/dataset1", "labels", "train" if split=="train" else "val")
     os.makedirs(img_out_dir, exist_ok=True)
     os.makedirs(label_out_dir, exist_ok=True)
 
