@@ -30,7 +30,7 @@ from unitree_sdk2py.common.rpc.client import ClientConfig
 # -----------------------------
 # 初始化 Go2 控制客户端
 # -----------------------------
-robot_ip = "192.168.19.222"  # 替换为你的 Go2 IP
+robot_ip = "192.168.123.161"  # 替换为你的 Go2 IP
 sport_client = SportClient(ClientConfig(ip=robot_ip, udp_port=8000))
 sport_client.Start()  # 启动运动控制服务
 time.sleep(1)
@@ -40,11 +40,11 @@ print("[INFO] Connected to Go2")
 # 手势 -> 动作映射表
 # -----------------------------
 gesture_to_command = {
-    "hello":   "StandUp",      # 张手掌 → 站立
-    "fist":   "StandDown",    # 拳头 → 蹲下
-    "ok":  "MoveForward",  # 大拇指 → 前进
-    "vectory": "MoveBack",     # V 手势 → 后退
-    "okay":     "StopMove"      # OK 手势 → 停止
+    "01_palm":   "StandUp",      # 张手掌 → 站立
+    "03_fist":   "StandDown",    # 拳头 → 蹲下
+    "07_ok":  "MoveForward",  # 大拇指 → 前进
+    "05_thumb": "MoveBack",     # V 手势 → 后退
+    "10_down":     "StopMove"      # OK 手势 → 停止
 }
 
 # -----------------------------

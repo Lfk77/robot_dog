@@ -1,68 +1,73 @@
 import time
 import cv2
-from ultralytics import YOLO  # YOLOv8 官方库
+from ultralytics import YOLO
 
 # -----------------------------
-# SDK 相关
+# Go2 SDK
 # -----------------------------
 from unitree_sdk2py.go2.sport.sport_client import SportClient
-from unitree_sdk2py.common.rpc.client import ClientConfig
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
 # -----------------------------
-# 初始化 Go2 控制客户端
+# 初始化 DDS（⚠️ 必须）
 # -----------------------------
-robot_ip = "192.168.19.222"  # 替换为你的 Go2 IP
-sport_client = SportClient(ClientConfig(ip=robot_ip, udp_port=8000))
-sport_client.Start()  # 启动运动控制服务
-time.sleep(1)
-print("[INFO] Connected to Go2")
+print("WARNING: Please ensure there are no obstacles around the robot.")
+input("Press Enter to continue...")
+
+ChannelFactoryInitialize(0)   # 和 SDK 示例保持一致
+
+sport_client = SportClient()
+sport_client.SetTimeout(10.0)
+sport_client.Init()
+
+print("[INFO] Go2 SportClient initialized")
 
 # -----------------------------
-# 手势 -> 动作映射表
+# 手势 -> 动作映射
 # -----------------------------
 gesture_to_command = {
-    "hello":   "StandUp",      # 张手掌 → 站立
-    "fist":   "StandDown",    # 拳头 → 蹲下
-    "ok":  "MoveForward",  # 大拇指 → 前进
-    "vectory": "MoveBack",     # V 手势 → 后退
-    "okay":     "StopMove"      # OK 手势 → 停止
+    "hello": "StandUp",
+    "fist": "StandDown",
+    "ok": "MoveForward",
+    "victory": "StopMove",
 }
 
-# -----------------------------
-# 执行动作函数
-# -----------------------------
 def execute_action(cmd):
-    """
-    根据动作指令调用 Go2 SDK 执行动作
-    """
     if cmd == "StandUp":
         sport_client.StandUp()
     elif cmd == "StandDown":
         sport_client.StandDown()
     elif cmd == "MoveForward":
-        sport_client.Move(vx=0.5, vy=0.0, vyaw=0.0)  # 向前移动
-    elif cmd == "MoveBack":
-        sport_client.Move(vx=-0.5, vy=0.0, vyaw=0.0) # 向后移动
+        sport_client.Move(0.4, 0.0, 0.0)
     elif cmd == "StopMove":
         sport_client.StopMove()
+
     print(f"[ACTION] {cmd}")
 
 # -----------------------------
-# 加载手势识别模型（YOLOv8）
+# YOLO 模型
 # -----------------------------
-model = YOLO("runs/detect/train9/weights/best.pt")  # 替换为你训练好的手势模型权重
+model = YOLO("runs/detect/train9/weights/best.pt")
 
 # -----------------------------
-# 摄像头初始化
+# ✅ 使用 Go2 摄像头 RTSP 流
 # -----------------------------
-cap = cv2.VideoCapture(0)  # 默认摄像头
+GO2_IP = "192.168.123.161"
+RTSP_URL = f"rtsp://{GO2_IP}:8554/live"
+
+cap = cv2.VideoCapture(RTSP_URL)
+
 if not cap.isOpened():
-    raise RuntimeError("Cannot open camera")
+    raise RuntimeError("❌ Cannot open Go2 camera RTSP stream")
 
-# 防抖参数
-last_gesture = None  # 上一帧识别的手势
-counter = 0          # 连续识别帧计数
-THRESH = 5           # 连续帧阈值
+print("[INFO] Go2 camera stream opened")
+
+# -----------------------------
+# 防抖
+# -----------------------------
+last_gesture = None
+counter = 0
+THRESH = 5
 
 # -----------------------------
 # 主循环
@@ -71,54 +76,53 @@ try:
     while True:
         ret, frame = cap.read()
         if not ret:
+            print("[WARN] Frame grab failed")
             continue
 
-        # YOLOv8 模型预测
-        results = model.predict(frame)[0]  # 返回第一张图像结果
-        if len(results.boxes) > 0:
-            # 取置信度最高的手势
+        results = model.predict(frame, conf=0.8, verbose=False)[0]
+
+        gesture = None
+        conf = 0.0
+
+        if results.boxes:
             box = results.boxes[0]
             gesture = results.names[int(box.cls[0])]
             conf = float(box.conf[0])
-        else:
-            gesture = None
-            conf = 0.0
 
-        # 置信度高于 0.8 才处理
-        if conf > 0.8:
+        if gesture:
             if gesture == last_gesture:
                 counter += 1
             else:
                 last_gesture = gesture
                 counter = 1
 
-            # 连续 THRESH 帧识别同一手势才执行动作
             if counter >= THRESH:
                 cmd = gesture_to_command.get(gesture)
                 if cmd:
                     execute_action(cmd)
                 counter = 0
 
-        # 显示识别结果
-        text = f"{gesture} ({conf:.2f})" if gesture else "None"
-        cv2.putText(frame, text, (10,30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
-        cv2.imshow("Go2 Hand Control", frame)
+        cv2.putText(
+            frame,
+            f"{gesture} {conf:.2f}" if gesture else "None",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2
+        )
 
-        # 按 'q' 退出
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        cv2.imshow("Go2 Hand Gesture Control", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
 except KeyboardInterrupt:
-    print("[INFO] KeyboardInterrupt received")
+    print("[INFO] KeyboardInterrupt")
 
 finally:
-    # 释放摄像头和窗口
     cap.release()
     cv2.destroyAllWindows()
-
-    # 让机器人停止动作，蹲下，关闭控制服务
     sport_client.StopMove()
     sport_client.StandDown()
-    sport_client.Stop()
-    print("[INFO] Exited safely")
+    print("[INFO] Exit safely")
