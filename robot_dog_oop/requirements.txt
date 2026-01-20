@@ -1,0 +1,29 @@
+# Core AI Models
+# torch==2.0.1+cu118
+# torchvision==0.15.2+cu118
+
+# YOLOv8
+ultralytics>=8.0.20
+
+# Computer Vision
+opencv-python>=4.8.1
+numpy>=1.24.0
+mediapipe==0.10.9
+
+# Face Recognition
+# facenet-pytorch>=2.5.2
+# mtcnn>=0.1.1
+
+# Analysis
+matplotlib>=3.7.1
+pandas>=2.0.0
+scipy>=1.9.0
+
+# Tools
+tqdm>=4.66.1
+PyYAML>=6.0
+
+# Unitree SDK (optional)
+# unitree_sdk2py
+# unitree_webrtc_connect
+# aiortc

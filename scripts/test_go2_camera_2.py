@@ -15,7 +15,7 @@ def main():
     # 创建 WebRTC 连接（直连以太网 STA）
     conn = UnitreeWebRTCConnection(connectionMethod=WebRTCConnectionMethod.LocalSTA, ip="192.168.123.161")
 
-    # 异步回调，用于接收视频帧
+    # 异步回调，用于接收视频帧 
     async def recv_video(track: MediaStreamTrack):
         while True:
             frame = await track.recv()

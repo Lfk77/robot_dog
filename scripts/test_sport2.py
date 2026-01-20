@@ -2,254 +2,297 @@
 # -*- coding: utf-8 -*-
 
 """
-test_sport2.py - 使用手部区域检测+分类方法控制Go2机器人
-
-功能说明：
-1. 使用MediaPipe进行手部关键点检测
-2. 根据关键点生成手部区域边界框
-3. 使用YOLOv8分类模型对手部区域进行手势分类
-4. 通过防抖机制控制Go2机器人执行相应动作
-
-与test_sport.py的区别：
-- test_sport.py: 使用YOLOv8检测模型直接检测手势
-- test_sport2.py: 使用手部区域检测+分类方法（MediaPipe + YOLOv8分类）
+test_sport_ethernet_webrtc.py
+- Go2 以太网直连动作控制（指定网卡名）
+- WebRTC 摄像头 + MediaPipe 手部检测 + YOLO 分类手势
+- 显示手部 bbox 和手势标签 + FPS
 """
 
-import time
+import asyncio
 import cv2
+import time
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-import mediapipe as mp
 from ultralytics import YOLO
+import mediapipe as mp
 
 # -----------------------------
-# SDK 相关
+# Unitree SDK
 # -----------------------------
 from unitree_sdk2py.go2.sport.sport_client import SportClient
-from unitree_sdk2py.common.rpc.client import ClientConfig
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+
+# WebRTC 摄像头
+from unitree_webrtc_connect.webrtc_driver import UnitreeWebRTCConnection, WebRTCConnectionMethod
+from aiortc import MediaStreamTrack
 
 # -----------------------------
-# 初始化 Go2 控制客户端
+# 配置参数
 # -----------------------------
-robot_ip = "192.168.123.161"  # 替换为你的 Go2 IP
-sport_client = SportClient(ClientConfig(ip=robot_ip, udp_port=8000))
-sport_client.Start()  # 启动运动控制服务
+TARGET_WIDTH = 320
+TARGET_HEIGHT = 240
+FRAME_QUEUE_SIZE = 3
+INFERENCE_THREADS = 2
+DISPLAY_SCALE = 2
+MODEL_SIZE = 160
+THRESH = 3
+ETH_INTERFACE = "enx6c1ff70a9027"  # 以太网网卡名
+
+# -----------------------------
+# 初始化 Go2（以太网直连）
+# -----------------------------
+ChannelFactoryInitialize(0, ETH_INTERFACE)
+sport_client = SportClient()
+sport_client.Init()  # 官方 SDK 要求 Init()
 time.sleep(1)
-print("[INFO] Connected to Go2")
+print("[INFO] Go2 SportClient initialized via Ethernet")
 
 # -----------------------------
-# 手势 -> 动作映射表
+# 订阅状态（卧倒自动站起）
+# -----------------------------
+current_state = None
+def state_callback(msg: SportModeState_):
+    global current_state
+    current_state = msg
+
+state_sub = ChannelSubscriber("sportmodestate", SportModeState_)
+state_sub.Init(state_callback, 10)
+
+t0 = time.time()
+while current_state is None and time.time() - t0 < 3:
+    time.sleep(0.1)
+
+if current_state and current_state.mode == 5:  # LieDown
+    print("[INFO] Robot is down → StandUp")
+    sport_client.StandUp()
+    time.sleep(2)
+
+# -----------------------------
+# 手势 -> 动作映射
 # -----------------------------
 gesture_to_command = {
-    "01_palm":   "StandUp",      # 张手掌 → 站立
-    "03_fist":   "StandDown",    # 拳头 → 蹲下
-    "07_ok":  "MoveForward",  # 大拇指 → 前进
-    "05_thumb": "MoveBack",     # V 手势 → 后退
-    "10_down":     "StopMove"      # OK 手势 → 停止
+    "01_palm":   "StandUp",
+    "03_fist":   "StandUp",
+    "07_ok":     "MoveForward",
+    "05_thumb":  "MoveBack",
+    "10_down":   "StandUp",
 }
 
-# -----------------------------
-# 执行动作函数
-# -----------------------------
 def execute_action(cmd):
-    """
-    根据动作指令调用 Go2 SDK 执行动作
-    """
-    if cmd == "StandUp":
-        sport_client.StandUp()
-    elif cmd == "StandDown":
-        sport_client.StandDown()
-    elif cmd == "MoveForward":
-        sport_client.Move(vx=0.5, vy=0.0, vyaw=0.0)  # 向前移动
-    elif cmd == "MoveBack":
-        sport_client.Move(vx=-0.5, vy=0.0, vyaw=0.0) # 向后移动
-    elif cmd == "StopMove":
-        sport_client.StopMove()
-    print(f"[ACTION] {cmd}")
+    try:
+        if cmd == "StandUp":
+            sport_client.Hello()
+        elif cmd == "StandDown":
+            sport_client.StandDown()
+        elif cmd == "MoveForward":
+            sport_client.Move(vx=0.5, vy=0.0, vyaw=0.0)
+        elif cmd == "MoveBack":
+            sport_client.Move(vx=-0.5, vy=0.0, vyaw=0.0)
+        elif cmd == "StopMove":
+            sport_client.StopMove()
+        print(f"[ACTION] {cmd}")
+    except Exception as e:
+        print(f"[ERROR] Action failed ({cmd}): {e}")
 
 # -----------------------------
-# 初始化MediaPipe手部检测
+# MediaPipe 初始化
 # -----------------------------
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
     static_image_mode=False,
-    max_num_hands=1,  # 只检测一只手
-    min_detection_confidence=0.6,
-    min_tracking_confidence=0.6
+    max_num_hands=1,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
 )
 mp_draw = mp.solutions.drawing_utils
 
 # -----------------------------
-# 加载手势分类模型（YOLOv8分类模型）
+# YOLO 手势分类模型
 # -----------------------------
-print("[INFO] 加载手势分类模型...")
-cls_model = YOLO("runs/classify/train3/weights/best.pt")  # 分类模型路径
-print("[INFO] 模型加载完成")
+print("[INFO] Loading YOLO hand classification model...")
+cls_model = YOLO("runs/classify/train3/weights/best.pt")
+cls_model.to('cpu')
+print("[INFO] Model loaded")
 
 # -----------------------------
-# 手部区域处理函数
+# WebRTC 摄像头队列
 # -----------------------------
+frame_queue = deque(maxlen=FRAME_QUEUE_SIZE)
+frame_lock = threading.Lock()
+frame_available = threading.Condition()
+
+# FPS 监控
+class FPSMonitor:
+    def __init__(self, window_size=10):
+        self.timestamps = deque(maxlen=window_size)
+        self.fps = 0
+    def update(self):
+        self.timestamps.append(time.time())
+        if len(self.timestamps) > 1:
+            self.fps = len(self.timestamps) / (self.timestamps[-1] - self.timestamps[0])
+        return self.fps
+fps_monitor = FPSMonitor()
+
+async def video_callback(track: MediaStreamTrack):
+    while True:
+        try:
+            frame = await track.recv()
+            img = frame.to_ndarray(format="bgr24")
+            img = cv2.resize(img, (TARGET_WIDTH, TARGET_HEIGHT))
+            with frame_lock:
+                frame_queue.append(img)
+                with frame_available:
+                    frame_available.notify()
+            await asyncio.sleep(0)
+        except Exception as e:
+            print(f"[ERROR] Frame capture error: {e}")
+            break
+
+async def start_camera():
+    conn = UnitreeWebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip="192.168.123.161")
+    await conn.connect()
+    conn.video.switchVideoChannel(True)
+    conn.video.add_track_callback(video_callback)
+    return conn
+
+def camera_thread(loop, future):
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(future)
+    loop.run_forever()
+
+# -----------------------------
+# 手部 bbox / 分类
+# -----------------------------
+inference_executor = ThreadPoolExecutor(max_workers=INFERENCE_THREADS)
+
 def get_hand_bbox(landmarks, w, h, pad_ratio=0.3):
-    """根据21个关键点计算bbox并放大"""
     xs = [lm.x for lm in landmarks.landmark]
     ys = [lm.y for lm in landmarks.landmark]
-
-    x1 = int(min(xs) * w)
-    y1 = int(min(ys) * h)
-    x2 = int(max(xs) * w)
-    y2 = int(max(ys) * h)
-
-    bw = x2 - x1
-    bh = y2 - y1
-
-    pad_w = int(bw * pad_ratio)
-    pad_h = int(bh * pad_ratio)
-
-    x1 = max(0, x1 - pad_w)
-    y1 = max(0, y1 - pad_h)
-    x2 = min(w, x2 + pad_w)
-    y2 = min(h, y2 + pad_h)
-
+    x1, y1 = int(min(xs)*w), int(min(ys)*h)
+    x2, y2 = int(max(xs)*w), int(max(ys)*h)
+    bw, bh = x2-x1, y2-y1
+    pad_w, pad_h = int(bw*pad_ratio), int(bh*pad_ratio)
+    x1, y1 = max(0,x1-pad_w), max(0,y1-pad_h)
+    x2, y2 = min(w,x2+pad_w), min(h,y2+pad_h)
     return x1, y1, x2, y2
 
-def classify_hand(hand_img, imgsz=224):
-    """YOLOv8分类模型预测手势"""
+def classify_hand(hand_img):
     try:
         if hand_img is None or hand_img.size == 0:
             return "unknown", 0.0
-
-        # BGR -> RGB
         hand_img = cv2.cvtColor(hand_img, cv2.COLOR_BGR2RGB)
-        # resize
-        hand_img = cv2.resize(hand_img, (imgsz, imgsz))
-        # 确保 np.ndarray 且 dtype uint8
-        hand_img = np.array(hand_img, dtype=np.uint8)
-
-        # 推理
-        results = cls_model(hand_img, device="cpu", verbose=False)[0]
-
+        hand_img = cv2.resize(hand_img, (MODEL_SIZE, MODEL_SIZE))
+        results = cls_model(hand_img, device='cpu', verbose=False)[0]
         if hasattr(results, "probs") and results.probs is not None:
-            # 获取概率数据 - 注意：results.probs是一个Probs对象，需要访问.data属性
             probs = results.probs.data.cpu().numpy()
-            class_id = int(np.argmax(probs))
-            conf = float(probs[class_id])
-            class_name = results.names[class_id]
-            return class_name, conf
+            cid = int(np.argmax(probs))
+            conf = float(probs[cid])
+            return results.names[cid], conf
         else:
             return "unknown", 0.0
-
     except Exception as e:
-        print(f"[ERROR] 分类模型预测异常: {e}")
+        print(f"[ERROR] Classification error: {e}")
         return "error", 0.0
 
 # -----------------------------
-# 摄像头初始化
+# 主显示循环
 # -----------------------------
-cap = cv2.VideoCapture(0)  # 默认摄像头
-if not cap.isOpened():
-    raise RuntimeError("Cannot open camera")
+last_gesture = None
+counter = 0
 
-# 防抖参数
-last_gesture = None  # 上一帧识别的手势
-counter = 0          # 连续识别帧计数
-THRESH = 5           # 连续帧阈值
+def display_loop():
+    global last_gesture, counter
+    current_frame = None
+    inference_future = None
+    last_inf_time = 0
+    inf_interval = 0.1
 
-# FPS统计
-last_time = time.time()
-fps = 0
+    cv2.namedWindow("Go2 Hand Control", cv2.WINDOW_NORMAL)
 
-# -----------------------------
-# 主循环
-# -----------------------------
-try:
     while True:
-        ret, frame = cap.read()
-        if not ret:
+        with frame_lock:
+            if frame_queue:
+                current_frame = frame_queue[-1]
+                while len(frame_queue) > 1:
+                    frame_queue.popleft()
+        if current_frame is None:
+            with frame_available:
+                frame_available.wait(timeout=0.01)
             continue
 
-        h, w, _ = frame.shape
-        
-        # 计算FPS
-        now = time.time()
-        fps = 1.0 / (now - last_time)
-        last_time = now
-        
-        # MediaPipe手部检测
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, _ = current_frame.shape
+
+        # MediaPipe 手部检测
+        rgb = cv2.cvtColor(current_frame, cv2.COLOR_BGR2RGB)
         result = hands.process(rgb)
-        
-        gesture = None
-        conf = 0.0
-        bbox = None
-        
+
+        gesture_text = "No gesture"
         if result.multi_hand_landmarks:
-            for hand_landmarks in result.multi_hand_landmarks:
-                # 绘制关键点
-                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-                
-                # 获取手部边界框
-                x1, y1, x2, y2 = get_hand_bbox(hand_landmarks, w, h)
-                bbox = (x1, y1, x2, y2)
-                
-                # 裁剪手部区域
-                hand_img = frame[y1:y2, x1:x2]
-                
-                # 分类手势
-                gesture, conf = classify_hand(hand_img)
-                
-                # 绘制边界框和标签
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(
-                    frame,
-                    f"{gesture}: {conf:.2f}",
-                    (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2
-                )
-                break  # 只处理第一只手
+            hand_landmarks = result.multi_hand_landmarks[0]
+            x1, y1, x2, y2 = get_hand_bbox(hand_landmarks, w, h)
+            hand_img = current_frame[y1:y2, x1:x2]
 
-        # 置信度高于0.8才处理
-        if conf > 0.8 and gesture:
-            if gesture == last_gesture:
-                counter += 1
-            else:
-                last_gesture = gesture
-                counter = 1
+            # 异步 YOLO 分类
+            if (inference_future is None or inference_future.done()) and (time.time() - last_inf_time >= inf_interval):
+                inference_future = inference_executor.submit(classify_hand, hand_img)
+                last_inf_time = time.time()
+            
+            if inference_future and inference_future.done():
+                gesture, conf = inference_future.result()
+                if conf > 0.7:
+                    if gesture == last_gesture:
+                        counter += 1
+                    else:
+                        last_gesture = gesture
+                        counter = 1
+                    if counter >= THRESH:
+                        cmd = gesture_to_command.get(gesture)
+                        if cmd:
+                            execute_action(cmd)
+                        counter = 0
+                    gesture_text = f"{gesture} ({conf:.2f})"
+                else:
+                    gesture_text = "Low confidence"
+                    last_gesture = None
+                    counter = 0
 
-            # 连续THRESH帧识别同一手势才执行动作
-            if counter >= THRESH:
-                cmd = gesture_to_command.get(gesture)
-                if cmd:
-                    execute_action(cmd)
-                counter = 0
+            # 绘制 bbox 和手部关键点
+            cv2.rectangle(current_frame, (x1, y1), (x2, y2), (0,255,0), 2)
+            mp_draw.draw_landmarks(current_frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-        # 显示识别结果和FPS
-        text = f"{gesture} ({conf:.2f})" if gesture else "None"
-        cv2.putText(frame, text, (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(frame, f"FPS: {int(fps)}", (10, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-        
-        cv2.imshow("Go2 Hand Control (Hand Region + Classification)", frame)
+        # FPS 显示
+        fps_monitor.update()
+        cv2.putText(current_frame, f"FPS: {fps_monitor.fps:.1f}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0),2)
+        cv2.putText(current_frame, gesture_text, (10,60), cv2.FONT_HERSHEY_SIMPLEX,0.6,(0,255,0),2)
 
-        # 按'q'退出
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        display_frame = cv2.resize(current_frame, (TARGET_WIDTH*DISPLAY_SCALE, TARGET_HEIGHT*DISPLAY_SCALE))
+        cv2.imshow("Go2 Hand Control", display_frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
 
-except KeyboardInterrupt:
-    print("[INFO] KeyboardInterrupt received")
-
-finally:
-    # 释放摄像头和窗口
-    cap.release()
+    # 清理
     cv2.destroyAllWindows()
-    
-    # 关闭MediaPipe
-    hands.close()
-
-    # 让机器人停止动作，蹲下，关闭控制服务
     sport_client.StopMove()
     sport_client.StandDown()
-    sport_client.Stop()
+    inference_executor.shutdown(wait=False)
+    hands.close()
     print("[INFO] Exited safely")
+
+# -----------------------------
+# 启动
+# -----------------------------
+if __name__ == "__main__":
+    print("[INFO] Starting hand control (Ethernet + WebRTC)...")
+    loop = asyncio.new_event_loop()
+    future = start_camera()
+    cam_thread = threading.Thread(target=camera_thread, args=(loop, future), daemon=True)
+    cam_thread.start()
+    time.sleep(3)  # 等待摄像头初始化
+    display_loop()
+    loop.call_soon_threadsafe(loop.stop)
+    cam_thread.join(timeout=2.0)
